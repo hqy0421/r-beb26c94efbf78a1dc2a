@@ -317,6 +317,17 @@ class Document:
         """
         data_index = {}
 
+        def occurrence_sort_key(item):
+            """Use explicit positions, falling back to the stored list order.
+
+            Occurrences remain separate list entries even when they reference
+            the same reused record primary key.
+            """
+            row_number, source_index, _pk = item
+            if row_number is None:
+                return 1, source_index
+            return 0, row_number, source_index
+
         # convert data to keyed dict for easier access
         temp = (
             ""
@@ -338,23 +349,48 @@ class Document:
                 index = {}
                 if rel.other_table.is_reused:
                     if tb.type_name in self.data:
-                        for row in self.data[tb.type_name]["relations_n"][
-                            rel.rel_table_name
-                        ]["records"]:
-                            if row[f"{temp}fk_{tb.name}"] not in index:
-                                index[row[f"{temp}fk_{tb.name}"]] = []
-                            index[row[f"{temp}fk_{tb.name}"]].append(
-                                row[f"{temp}fk_{rel.other_table.name}"]
+                        for source_index, row in enumerate(
+                            self.data[tb.type_name]["relations_n"][
+                                rel.rel_table_name
+                            ]["records"]
+                        ):
+                            parent_pk = row[f"{temp}fk_{tb.name}"]
+                            index.setdefault(parent_pk, []).append(
+                                (
+                                    row.get("xml2db_row_number"),
+                                    source_index,
+                                    row[f"{temp}fk_{rel.other_table.name}"],
+                                )
                             )
+                        for parent_pk, occurrences in index.items():
+                            occurrences.sort(key=occurrence_sort_key)
+                            index[parent_pk] = [
+                                pk
+                                for _row_number, _source_index, pk in occurrences
+                            ]
                 else:
                     if rel.other_table.type_name in self.data:
-                        for row in self.data[rel.other_table.type_name]["records"]:
-                            if row[f"{temp}fk_parent_{tb.name}"] not in index:
-                                index[row[f"{temp}fk_parent_{tb.name}"]] = []
-                            index[row[f"{temp}fk_parent_{tb.name}"]].append(
-                                row[f"{temp}pk_{rel.other_table.name}"]
+                        occurrences_by_parent = {}
+                        for source_index, row in enumerate(
+                            self.data[rel.other_table.type_name]["records"]
+                        ):
+                            parent_pk = row[f"{temp}fk_parent_{tb.name}"]
+                            occurrences_by_parent.setdefault(parent_pk, []).append(
+                                (
+                                    row.get("xml2db_row_number"),
+                                    source_index,
+                                    row[f"{temp}pk_{rel.other_table.name}"],
+                                )
                             )
+                        for parent_pk, occurrences in occurrences_by_parent.items():
+                            occurrences.sort(key=occurrence_sort_key)
+                            index[parent_pk] = [
+                                pk
+                                for _row_number, _source_index, pk in occurrences
+                            ]
                 data_index[tb.type_name]["relations_n"][rel.rel_table_name] = index
+
+        built_nodes = {}
 
         def _build_node(node_type: str, node_pk: int) -> tuple:
             """Build a dict node recursively
@@ -366,6 +402,10 @@ class Document:
             Returns:
                 A node as a tuple (node_type, content, hash)
             """
+            cache_key = (node_type, node_pk)
+            if cache_key in built_nodes:
+                return built_nodes[cache_key]
+
             tb = self.model.tables[node_type]
             content = {}
 
@@ -413,7 +453,9 @@ class Document:
                             rel.rel_table_name
                         ][node_pk]
                     ]
-            return node_type, content
+            node = (node_type, content)
+            built_nodes[cache_key] = node
+            return node
 
         return _build_node(
             self.model.root_table,
